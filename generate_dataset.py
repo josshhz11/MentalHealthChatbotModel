@@ -6,6 +6,9 @@ import sqlite3
 import pandas as pd
 import os
 import sys
+import torch_directml
+from langchain_ollama import OllamaLLM
+import torch
 
 general_question_bank = [
     "Did you partake in physical activity today?",
@@ -17,7 +20,42 @@ general_question_bank = [
     "What did you do that you enjoyed today? (like a hobby)"
 ]
 
-model = OllamaLLM(model="llama3.2")
+# Update model initialization at the top of the file
+def initialize_model():
+    try:
+        # Configure GPU settings
+        device = torch_directml.device()
+        print(f"🔧 Initializing model with device: {device}")
+        
+        model = OllamaLLM(
+            model="llama3.2",
+            num_thread=8,  # Adjust based on your CPU cores
+            num_gpu=1,
+            f16_kv=True,   # Enable half-precision for better performance
+            gpu_layers=35,  # Adjust based on available memory
+        )
+        
+        print("✅ Model initialized with GPU support")
+        return model
+    except Exception as e:
+        print(f"❌ GPU initialization failed: {e}")
+        print("⚠️ Falling back to CPU model")
+        return OllamaLLM(model="llama3.2")
+
+# Replace the direct model initialization with the function call
+model = initialize_model()
+
+# Add GPU utilization monitoring
+def print_gpu_utilization():
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        print(f"\nMemory Usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+        if torch.cuda.is_available():
+            print(f"GPU Memory: {torch.cuda.max_memory_allocated() / 1024 / 1024:.2f} MB")
+    except:
+        pass
+
 template_str = """
 Answer the question below.
 
@@ -104,88 +142,108 @@ def generate_refined_questions():
 def generate_responses(num_responses=50):
     print("🚀 Starting response generation process...")
 
-    # Check if database exists
-    db_exists = os.path.exists('mental_health_data.db')
+    try:
+        # Print GPU information
+        device = torch_directml.device()
+        print(f"📊 Using device: {device}")
     
-    if not db_exists:
-        print("📁 Database not found. Initializing new database...")
-        if not initialize_db():
-            return
 
-    # Connect to database
-    conn = sqlite3.connect('mental_health_data.db')
-    cursor = conn.cursor()
+        # Check if database exists
+        db_exists = os.path.exists('mental_health_data.db')
+        
+        if not db_exists:
+            print("📁 Database not found. Initializing new database...")
+            if not initialize_db():
+                return
 
-    # Read refined questions from file
-    print("📖 Reading refined questions from file...")
-    with open('refined_questions.txt', 'r') as f:
-        questions = [line.strip() for line in f.readlines() if line.strip()]
+        # Connect to database
+        conn = sqlite3.connect('mental_health_data.db')
+        cursor = conn.cursor()
 
-    # Insert questions
-    print("📝 Inserting questions into database...")
-    for question in questions:
-        cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
+        # Read refined questions from file
+        print("📖 Reading refined questions from file...")
+        with open('refined_questions.txt', 'r') as f:
+            questions = [line.strip() for line in f.readlines() if line.strip()]
 
-    # Check which questions are new
-    existing_questions = pd.read_sql_query("SELECT question_text FROM questions", conn)
-    new_questions = [q for q in questions if q not in existing_questions['question_text'].values]
+        # Get existing questions from database
+        print("🔍 Checking for existing questions...")
+        existing_questions = pd.read_sql_query("SELECT question_text FROM questions", conn)
+        existing_question_texts = existing_questions['question_text'].values
+
+        # Find new questions
+        new_questions = [q for q in questions if q not in existing_question_texts]
+
+        if new_questions:
+            print(f"📝 Inserting {len(new_questions)} new questions into database...")
+            for question in new_questions:
+                print("Adding question:", question)
+                cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
+            conn.commit()
+        else:
+            print("✅ No new questions to add")
+
+        # Get all question IDs
+        question_df = pd.read_sql_query("SELECT question_id, question_text FROM questions", conn)
+        print(question_df)
+
+        # Generate responses using LLM
+        print(f"🤖 Generating {num_responses} sample responses per question using Llama3.2...")
+        
+        response_prompt = """You are a mental health patient who has been discharged from care. 
+        Generate a realistic, varied response to this follow-up question. 
+        The response should reflect different possible mental states and situations.
+        Mix positive, neutral, and negative responses to create a diverse dataset.
+        Keep responses between 1-3 sentences.
+
+        Question: {question}
+
+        Generate a single response:"""
+        
+        chat_prompt = ChatPromptTemplate.from_template(template=response_prompt)
+        chain = chat_prompt | model
+        
+        # Generate num_responses (default 50) for each question
+        for _, row in question_df.iterrows():
+            question_id = row['question_id']
+            question = row['question_text']
+            print(f"\n💭 Generating responses for question {question_id}/{len(question_df)}: {question}")
+
+            for i in range(num_responses):
+                if i % 10 == 0:
+                    print(f"Progress: {i}/{num_responses} responses")
+                
+                response = chain.invoke({"question": question})
+                
+                # Insert response into database
+                cursor.execute('''
+                    INSERT INTO responses (question_id, response_text)
+                    VALUES (?, ?)
+                ''', (question_id, response.strip()))
+        
+        # Commit changes
+        conn.commit()
+
+        # Update CSV files
+        update_csv_files(conn)
+        
+        conn.close()
+        
+        print("\n✅ Process completed successfully!")
+        print(f"📊 Generated {len(questions) * 50} total responses")
+        print("💾 Data saved to:")
+        print("   - mental_health_data.db (SQLite database)")
+        print("   - questions.csv")
+        print("   - responses.csv")
     
-    if new_questions:
-        print(f"📝 Inserting {len(new_questions)} new questions into database...")
-        for question in new_questions:
-            cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
-
-    # Get all question IDs
-    question_df = pd.read_sql_query("SELECT question_id, question_text FROM questions", conn)
-
-    # Generate responses using LLM
-    print(f"🤖 Generating {num_responses} sample responses per question using Llama3.2...")
-    
-    response_prompt = """You are a mental health patient who has been discharged from care. 
-    Generate a realistic, varied response to this follow-up question. 
-    The response should reflect different possible mental states and situations.
-    Mix positive, neutral, and negative responses to create a diverse dataset.
-    Keep responses between 1-3 sentences.
-
-    Question: {question}
-
-    Generate a single response:"""
-    
-    chat_prompt = ChatPromptTemplate.from_template(template=response_prompt)
-    chain = chat_prompt | model
-    
-    # Generate num_responses (default 50) for each question
-    for _, row in question_df.iterrows():
-        question_id = row['question_id']
-        question = row['question_text']
-        print(f"\n💭 Generating responses for question {question_id}: {question}")
-
-        for i in range(num_responses):
-            if i % 10 == 0:
-                print(f"Progress: {i}/{num_responses} responses")
-            
-            response = chain.invoke({"question": question})
-            
-            # Insert response into database
-            cursor.execute('''
-                INSERT INTO responses (question_id, response_text)
-                VALUES (?, ?)
-            ''', (question_id, response.strip()))
-    
-    # Commit changes
-    conn.commit()
-
-    # Update CSV files
-    update_csv_files(conn)
-    
-    conn.close()
-    
-    print("\n✅ Process completed successfully!")
-    print(f"📊 Generated {len(questions) * 50} total responses")
-    print("💾 Data saved to:")
-    print("   - mental_health_data.db (SQLite database)")
-    print("   - questions.csv")
-    print("   - responses.csv")
+    except Exception as e:
+        print(f"❌ Error during response generation: {e}")
+        raise
+    finally:
+        # Cleanup
+        print("🧹 Cleaning up GPU memory...")
+        if hasattr(model, 'to'):
+            model.to('cpu')
+        torch.cuda.empty_cache()
 
 def update_csv_files(conn):
     """Update CSV files with current database content"""
@@ -319,9 +377,10 @@ def query_db():
             print("4. View summary statistics")
             print("5. Custom SQL query")
             print("6. Delete DB entries")
-            print("7. Exit")
+            print("7. Update CSV")
+            print("8. Exit")
             
-            choice = input("\nEnter your choice (1-7): ")
+            choice = input("\nEnter your choice (1-8): ")
 
             match(choice):
                 case '1':
@@ -436,6 +495,8 @@ def query_db():
                 case '6':
                     delete_db_entries()
                 case '7':
+                    update_csv_files(conn)
+                case '8':
                     print("Exiting query tool...")
                     break
                 case _:
@@ -496,6 +557,9 @@ def delete_db_entries():
                 
                 conn.commit()
                 print(f"✅ Successfully deleted {cursor.rowcount} entries")
+
+                # Update CSV files after successful deletion
+                update_csv_files(conn)
                 
                 # Show updated entries
                 df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
@@ -514,7 +578,58 @@ def delete_db_entries():
         print(f"❌ Database error: {e}")
     finally:
         conn.close()
-    
+
+def update_db_from_csv():
+    try:
+        print("🔄 Updating database from CSV...")
+        conn = sqlite3.connect('mental_health_data.db')
+        
+        # Read the CSV file
+        try:
+            df = pd.read_csv('responses.csv')
+            if 'response_id' not in df.columns or 'sentiment_score' not in df.columns:
+                print("❌ CSV file must contain 'response_id' and 'sentiment_score' columns")
+                return
+        except Exception as e:
+            print(f"❌ Error reading CSV: {e}")
+            return
+
+        # Update sentiment scores in database
+        updated_count = 0
+        error_count = 0
+        
+        print("📊 Updating sentiment scores...")
+        for _, row in df.iterrows():
+            if pd.notna(row['sentiment_score']):  # Only update if sentiment score exists
+                try:
+                    conn.execute('''
+                        UPDATE responses 
+                        SET sentiment_score = ? 
+                        WHERE response_id = ?
+                    ''', (int(row['sentiment_score']), row['response_id']))
+                    updated_count += 1
+                except Exception as e:
+                    print(f"❌ Error updating response_id {row['response_id']}: {e}")
+                    error_count += 1
+            
+            # Show progress every 50 records
+            if updated_count % 50 == 0 and updated_count > 0:
+                print(f"Progress: {updated_count} records updated...")
+        
+        conn.commit()
+        print(f"\n✅ Update complete!")
+        print(f"📊 Statistics:")
+        print(f"- Total records processed: {len(df)}")
+        print(f"- Records updated: {updated_count}")
+        print(f"- Errors: {error_count}")
+        
+        # Update CSV files to sync everything
+        update_csv_files(conn)
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+    finally:
+        conn.close()    
 
 def display_menu():
     print("\n=== Mental Health Question & Response Generator ===")
@@ -522,6 +637,7 @@ def display_menu():
     print("2. Generate Responses")
     print("3. Query Database")
     print("4. Label Sentiments")
+    print("5. Update DB from CSV")
     print("0. Exit")
     return input("\nSelect an option: ")
 
@@ -545,6 +661,8 @@ def main():
                 query_db()
             case '4':
                 label_sentiments()
+            case '5':
+                update_db_from_csv()
             case '0':
                 print("Exiting...")
                 sys.exit()

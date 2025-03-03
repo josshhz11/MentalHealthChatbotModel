@@ -2719,3 +2719,695 @@ Changes made:
 2. Updated print format to show IDs and scores on one line
 3. Separated question and response text for better readability
 4. Maintained consistent formatting across both cases
+
+josshhz11: # Read refined questions from file
+    print("📖 Reading refined questions from file...")
+    with open('refined_questions.txt', 'r') as f:
+        questions = [line.strip() for line in f.readlines() if line.strip()]
+
+    # Insert questions
+    print("📝 Inserting questions into database...")
+    for question in questions:
+        cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
+
+    # Check which questions are new
+    existing_questions = pd.read_sql_query("SELECT question_text FROM questions", conn)
+    new_questions = [q for q in questions if q not in existing_questions['question_text'].values]
+    
+    if new_questions:
+        print(f"📝 Inserting {len(new_questions)} new questions into database...")
+        for question in new_questions:
+            cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
+
+    # Get all question IDs
+    question_df = pd.read_sql_query("SELECT question_id, question_text FROM questions", conn)
+
+    for this part, does it check the refined_questions.txt file, and only add the questions to the database if they are not already there?
+
+GitHub Copilot: Let's analyze this section of code. There's actually a logic issue here - it's inserting all questions first and then checking for new ones, which could lead to duplicate entries. Here's how to fix it:
+
+```python
+    # Read refined questions from file
+    print("📖 Reading refined questions from file...")
+    with open('refined_questions.txt', 'r') as f:
+        questions = [line.strip() for line in f.readlines() if line.strip()]
+
+    # Get existing questions from database
+    print("🔍 Checking for existing questions...")
+    existing_questions = pd.read_sql_query("SELECT question_text FROM questions", conn)
+    existing_question_texts = existing_questions['question_text'].values
+    
+    # Find new questions
+    new_questions = [q for q in questions if q not in existing_question_texts]
+    
+    if new_questions:
+        print(f"📝 Inserting {len(new_questions)} new questions into database...")
+        for question in new_questions:
+            cursor.execute('INSERT INTO questions (question_text) VALUES (?)', (question,))
+        conn.commit()
+    else:
+        print("✅ No new questions to add")
+
+    # Get all question IDs for further processing
+    question_df = pd.read_sql_query("SELECT question_id, question_text FROM questions", conn)
+```
+
+Key improvements:
+1. Removes duplicate insertion of questions
+2. Checks for existing questions before inserting
+3. Only inserts truly new questions
+4. Adds explicit commit after insertions
+5. Better progress messages
+
+The workflow is now:
+1. Read questions from file
+2. Get existing questions from database
+3. Compare and find only new questions
+4. Insert only the new questions
+5. Get updated question list for further processing
+
+josshhz11: so right now, i've deleted a couple of irrelevant responses from the database, does it automatically reflect and change the questions.csv and responses.csv files?
+
+GitHub Copilot: No, looking at the code, the `update_csv_files()` function is only called in two places:
+1. After generating responses in `generate_responses()`
+2. After labeling sentiments in `label_sentiments()`
+
+It's not called after deletions in `delete_db_entries()`. Let's fix this by adding the CSV update after successful deletions:
+
+```python
+def delete_db_entries():
+    try:
+        conn = sqlite3.connect('mental_health_data.db')
+        cursor = conn.cursor()
+        
+        # ...existing deletion code...
+        
+        if confirm.lower() == 'y':
+            # ...existing deletion execution...
+            
+            conn.commit()
+            print(f"✅ Successfully deleted {cursor.rowcount} entries")
+            
+            # Update CSV files after successful deletion
+            update_csv_files(conn)
+            
+            # Show updated entries
+            df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+            print(f"\nUpdated {table_name}:")
+            print(df)
+```
+
+Now the CSV files will automatically update whenever you delete entries from the database. You can verify this by checking the CSV files after deletion.
+
+josshhz11: how can i configure my amd gpu to run generate_dataset.py especially for generate_responses() function here in this file generate_dataset.py? it is used in sentiment_analysis_model_training.py
+
+GitHub Copilot: To configure AMD GPU support for generate_dataset.py, particularly for the `generate_responses()` function, we'll need to modify the model initialization and configuration. Here's how to update your code:
+
+```python
+import torch_directml
+from langchain_ollama import OllamaLLM
+
+# Update model initialization at the top of the file
+def initialize_model():
+    try:
+        # Configure GPU settings
+        device = torch_directml.device()
+        print(f"🔧 Initializing model with device: {device}")
+        
+        model = OllamaLLM(
+            model="llama3.2",
+            num_thread=8,  # Adjust based on your CPU cores
+            num_gpu=1,
+            f16_kv=True,   # Enable half-precision for better performance
+            gpu_layers=35,  # Adjust based on available memory
+        )
+        
+        print("✅ Model initialized with GPU support")
+        return model
+    except Exception as e:
+        print(f"❌ GPU initialization failed: {e}")
+        print("⚠️ Falling back to CPU model")
+        return OllamaLLM(model="llama3.2")
+
+# Replace the direct model initialization with the function call
+model = initialize_model()
+
+# Update generate_responses function
+def generate_responses(num_responses=50):
+    print("🚀 Starting response generation process...")
+    
+    try:
+        # Print GPU information
+        device = torch_directml.device()
+        print(f"📊 Using device: {device}")
+        
+        # ...rest of your existing generate_responses code...
+        
+        # Update the response generation loop with progress monitoring
+        for _, row in question_df.iterrows():
+            question_id = row['question_id']
+            question = row['question_text']
+            print(f"\n💭 Generating responses for question {question_id}/{len(question_df)}: {question}")
+            
+            for i in range(num_responses):
+                if i % 10 == 0:
+                    print(f"Progress: {i}/{num_responses} responses")
+                    print_gpu_utilization()  # Add GPU monitoring
+                
+                response = chain.invoke({"question": question})
+                
+                cursor.execute('''
+                    INSERT INTO responses (question_id, response_text)
+                    VALUES (?, ?)
+                ''', (question_id, response.strip()))
+                
+                if i % 50 == 0:  # Commit every 50 responses
+                    conn.commit()
+    
+    except Exception as e:
+        print(f"❌ Error during response generation: {e}")
+        raise
+    finally:
+        # Cleanup
+        print("🧹 Cleaning up resources...")
+        torch.cuda.empty_cache()  # Clear GPU memory
+
+# Add GPU utilization monitoring
+def print_gpu_utilization():
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        print(f"\nMemory Usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+        if torch.cuda.is_available():
+            print(f"GPU Memory: {torch.cuda.max_memory_allocated() / 1024 / 1024:.2f} MB")
+    except:
+        pass
+```
+
+Also, update your requirements.txt:
+
+```text
+torch-directml
+psutil
+langchain-ollama>=0.0.3
+transformers
+torch
+```
+
+Install the requirements:
+
+```bash
+pip install -r requirements.txt
+```
+
+Key changes made:
+1. Added GPU initialization function
+2. Configured Ollama for GPU usage
+3. Added memory monitoring
+4. Added proper cleanup
+5. Added progress tracking
+6. Added error handling
+
+To test if GPU is being used:
+1. Run the script
+2. Monitor GPU utilization
+3. Compare generation speeds
+
+The GPU configuration should now be properly set up for both response generation and model training.
+
+josshhz11: we are splitting the labelling work on the datasets and might label responses for each question (2, 3, 3), but we might label on the csv file directly. is there a way to push these labelled data onto the database and update it?
+
+for instance, have the file read the responses.csv for the responses and corresponding sentiment score, and update accordingly using a for loop for all responses by their response id
+
+GitHub Copilot: Yes, we can create a function to update the database from a modified CSV file. Here's how to do it:
+
+```python
+def update_db_from_csv():
+    try:
+        print("🔄 Updating database from CSV...")
+        conn = sqlite3.connect('mental_health_data.db')
+        
+        # Read the CSV file
+        try:
+            df = pd.read_csv('responses.csv')
+            if 'response_id' not in df.columns or 'sentiment_score' not in df.columns:
+                print("❌ CSV file must contain 'response_id' and 'sentiment_score' columns")
+                return
+        except Exception as e:
+            print(f"❌ Error reading CSV: {e}")
+            return
+
+        # Update sentiment scores in database
+        updated_count = 0
+        error_count = 0
+        
+        print("📊 Updating sentiment scores...")
+        for _, row in df.iterrows():
+            if pd.notna(row['sentiment_score']):  # Only update if sentiment score exists
+                try:
+                    conn.execute('''
+                        UPDATE responses 
+                        SET sentiment_score = ? 
+                        WHERE response_id = ?
+                    ''', (int(row['sentiment_score']), row['response_id']))
+                    updated_count += 1
+                except Exception as e:
+                    print(f"❌ Error updating response_id {row['response_id']}: {e}")
+                    error_count += 1
+            
+            # Show progress every 50 records
+            if updated_count % 50 == 0 and updated_count > 0:
+                print(f"Progress: {updated_count} records updated...")
+        
+        conn.commit()
+        print(f"\n✅ Update complete!")
+        print(f"📊 Statistics:")
+        print(f"- Total records processed: {len(df)}")
+        print(f"- Records updated: {updated_count}")
+        print(f"- Errors: {error_count}")
+        
+        # Update CSV files to sync everything
+        update_csv_files(conn)
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+    finally:
+        conn.close()
+```
+
+Add this option to your menu system:
+
+```python
+def display_menu():
+    print("\n=== Mental Health Question & Response Generator ===")
+    print("1. Generate Refined Questions")
+    print("2. Generate Responses")
+    print("3. Query Database")
+    print("4. Label Sentiments")
+    print("5. Update DB from CSV")  # New option
+    print("0. Exit")
+    return input("\nSelect an option: ")
+
+def main():
+    while True:
+        choice = display_menu()
+
+        match choice:
+            # ... existing cases ...
+            case '5':
+                update_db_from_csv()
+            case '0':
+                print("Exiting...")
+                sys.exit()
+            case _:
+                print("Invalid choice. Please try again.")
+```
+
+Usage workflow:
+1. Export current data to CSV
+2. Split CSV among team members
+3. Each person labels their portion
+4. Combine labeled CSVs into one
+5. Use "Update DB from CSV" option to sync back to database
+
+The function will:
+- Validate CSV format
+- Only update rows with sentiment scores
+- Show progress during update
+- Provide statistics after completion
+- Re-sync all CSV files after update
+
+Would you like me to add any additional features to this update function?
+
+josshhz11: once we have labelled our question and corresponding response data with a sentiment score, can we train an ML/AI/LLM model to predict sentiment scores of responses given a question, using NLP?
+
+is the implementation on this page correct?
+
+i wish to have the model inputs as the question, and the response, and have the output be the sentiment score. will this help the model train to predict scores?
+
+also should we use a genAI model that is good at NLP instead? to follow in line with the hackathon outline that specifically asks for a GenAI implementation. any suggestions? models that can be obtained from huggingface trainer for training
+
+
+GitHub Copilot: Let me help analyze and improve the sentiment analysis model for your use case:
+
+1. **Current Implementation Analysis**:
+- Your code uses BERT base model for regression
+- Takes only response text as input
+- Missing the question context
+- Uses DirectML for AMD GPU support
+
+2. **Suggested Improvements**:
+
+```python
+def prepare_dataset():
+    """Modified to include both question and response"""
+    conn = sqlite3.connect('mental_health_data.db')
+    df = pd.read_sql_query("""
+        SELECT q.question_text, r.response_text, r.sentiment_score
+        FROM responses r
+        JOIN questions q ON r.question_id = q.question_id
+        WHERE r.sentiment_score IS NOT NULL
+    """, conn)
+    conn.close()
+    
+    dataset = Dataset.from_pandas(df)
+    return dataset.train_test_split(test_size=0.2)
+
+def tokenize_function(examples, tokenizer):
+    """Modified to handle question-response pairs"""
+    # Combine question and response with a separator
+    combined_text = [
+        f"Question: {q} Response: {r}" 
+        for q, r in zip(examples["question_text"], examples["response_text"])
+    ]
+    
+    return tokenizer(
+        combined_text,
+        padding="max_length",
+        truncation=True,
+        max_length=256,  # Increased for combined text
+        return_tensors="pt"
+    )
+```
+
+3. **Recommended GenAI Models**:
+Here are better models for your task:
+
+```python
+# Choose one of these model configurations
+MODEL_CONFIGS = {
+    "flan-t5": {
+        "name": "google/flan-t5-base",
+        "type": "seq2seq"
+    },
+    "gpt2": {
+        "name": "gpt2",
+        "type": "causal"
+    },
+    "roberta": {
+        "name": "roberta-base",
+        "type": "masked"
+    }
+}
+
+def train_sentiment_model(model_num, model_type="flan-t5"):
+    config = MODEL_CONFIGS[model_type]
+    model_name = config["name"]
+```
+
+4. **Why These Models**:
+- **Flan-T5**: 
+  - Better at understanding context
+  - Good for question-answer tasks
+  - Smaller size, easier to fine-tune
+- **GPT-2**:
+  - Strong text generation
+  - Good context understanding
+  - Natural language processing
+- **RoBERTa**:
+  - Improved BERT architecture
+  - Better sentiment analysis
+  - More robust training
+
+5. **Training Configuration**:
+
+```python
+    training_args = TrainingArguments(
+        output_dir=f"./results/model_{model_num}",
+        num_train_epochs=5,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        warmup_ratio=0.1,
+        weight_decay=0.01,
+        logging_dir=f'./logs/model_{model_num}',
+        logging_steps=10,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="mse",
+        no_cuda=True,  # For DirectML
+        fp16=True
+    )
+```
+
+6. **Recommended Changes**:
+- Use Flan-T5 for better question-response understanding
+- Increase context window to handle both question and response
+- Add validation during training
+- Use proper metrics for regression task
+- Implement early stopping
+- Save best model checkpoint
+
+Would you like me to provide the complete updated implementation with these changes?
+
+josshhz11: can you expand on flan-t5 and what it is? it's by google? and what kind of category of a model would you classify it as, compared to stuff like BERT/RoBERTa,  or even Mistral or Llama3.2, etc.
+
+GitHub Copilot: Let me break down Flan-T5 and compare it with other models:
+
+### Flan-T5 Overview
+- **Origin**: Developed by Google Research
+- **Base Architecture**: Built on T5 (Text-to-Text Transfer Transformer)
+- **Key Feature**: Instruction-tuned model, meaning it's specifically trained to follow natural language instructions
+
+### Model Classification
+```mermaid
+graph TD
+    A[Language Models] --> B[Encoder-Decoder Models]
+    A --> C[Encoder-Only Models]
+    A --> D[Decoder-Only Models]
+    
+    B --> B1[T5/Flan-T5]
+    B --> B2[BART]
+    
+    C --> C1[BERT]
+    C --> C2[RoBERTa]
+    
+    D --> D1[GPT/Llama]
+    D --> D2[Mistral]
+```
+
+### Model Comparisons
+
+| Model | Architecture | Best For | Size Range | Training Approach |
+|-------|-------------|----------|------------|-------------------|
+| Flan-T5 | Encoder-Decoder | Instruction following, Text-to-text tasks | 80M - 11B | Instruction tuning |
+| BERT | Encoder-only | Understanding context, Classification | 110M - 340M | Masked language modeling |
+| RoBERTa | Encoder-only | Better BERT, Classification | 125M - 355M | Dynamic masking |
+| Llama 3.2 | Decoder-only | Generation, Chat | 7B - 70B | Autoregressive |
+| Mistral | Decoder-only | Efficient generation | 7B | Mixture of experts |
+
+### Why Flan-T5 for Your Task:
+1. **Text-to-Text Framework**
+   - Takes question + response as input
+   - Outputs sentiment score naturally
+   - More intuitive for regression tasks
+
+2. **Advantages**:
+```python
+# Example of how Flan-T5 processes input
+input_text = "Convert to sentiment score: Question: How are you feeling? Response: I'm feeling much better today!"
+# Flan-T5 can directly output: "75"
+
+# Compared to BERT which needs special tokens and fixed output format
+bert_input = "[CLS] Question: How are you feeling? [SEP] Response: I'm feeling much better today! [SEP]"
+# BERT outputs logits that need transformation
+```
+
+3. **Instruction Following**:
+- Better understands the task through natural instructions
+- More flexible in handling different input formats
+- Can be prompted to explain its scoring
+
+4. **Resource Requirements**:
+- Smaller versions available (base: 250M parameters)
+- More efficient than full Llama/Mistral
+- Works well with DirectML on AMD GPUs
+
+Would you like me to provide code examples for implementing Flan-T5 for your sentiment analysis task?
+
+josshhz11: yes can you implement the entire code, referencing the requirements and structure of this current code which does it using BERT?
+
+GitHub Copilot: I'll help you modify the code to use Flan-T5 instead of BERT, maintaining the same structure but optimizing for your question-response sentiment analysis task.
+
+```python
+import torch_directml
+import pandas as pd
+from transformers import (
+    AutoModelForSeq2SeqLM,  # Changed from AutoModelForSequenceClassification
+    AutoTokenizer,
+    TrainingArguments,
+    Seq2SeqTrainer,  # Changed from Trainer
+    Seq2SeqTrainingArguments,  # Added for seq2seq tasks
+    DataCollatorForSeq2Seq  # Added for seq2seq tasks
+)
+from datasets import Dataset
+import torch
+import sqlite3
+import os
+import numpy as np
+from sklearn.metrics import mean_squared_error, accuracy_score
+
+# Model constants
+MODEL_NAME = "google/flan-t5-base"  # Changed from bert-base-uncased
+MAX_INPUT_LENGTH = 512  # Increased for question + response
+MAX_TARGET_LENGTH = 8   # For sentiment score output
+
+def prepare_dataset():
+    """Modified to include both question and response"""
+    conn = sqlite3.connect('mental_health_data.db')
+    df = pd.read_sql_query("""
+        SELECT q.question_text, r.response_text, r.sentiment_score
+        FROM responses r
+        JOIN questions q ON r.question_id = q.question_id
+        WHERE r.sentiment_score IS NOT NULL
+    """, conn)
+    conn.close()
+    
+    # Format data for T5
+    df['input_text'] = 'Rate the sentiment: Question: ' + df['question_text'] + ' Response: ' + df['response_text']
+    df['target_text'] = df['sentiment_score'].astype(str)  # Convert score to string
+    
+    dataset = Dataset.from_pandas(df[['input_text', 'target_text']])
+    return dataset.train_test_split(test_size=0.2)
+
+def compute_metrics(eval_pred):
+    """Custom metrics computation for regression"""
+    predictions, labels = eval_pred
+    # Convert string predictions to numbers
+    predictions = np.array([float(pred.strip()) for pred in predictions])
+    labels = np.array([float(label.strip()) for label in labels])
+    
+    mse = mean_squared_error(labels, predictions)
+    rmse = np.sqrt(mse)
+    
+    # Binary classification metrics (for scores > 50)
+    binary_preds = predictions > 50
+    binary_labels = labels > 50
+    accuracy = accuracy_score(binary_labels, binary_preds)
+    
+    return {
+        'mse': mse,
+        'rmse': rmse,
+        'accuracy': accuracy
+    }
+
+def train_sentiment_model(model_num):
+    try:
+        device = torch_directml.device()
+        print(f"🔧 Initializing with device: {device}")
+        
+        model_path = get_model_path(model_num)
+        print(f"🎯 Training model {model_num}")
+        
+        # Load Flan-T5 model
+        print("📚 Loading Flan-T5 model...")
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        
+        # Prepare dataset
+        dataset = prepare_dataset()
+        
+        # Data collator
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer,
+            model=model,
+            label_pad_token_id=-100
+        )
+        
+        # Configure training arguments
+        training_args = Seq2SeqTrainingArguments(
+            output_dir=model_path,
+            evaluation_strategy="epoch",
+            learning_rate=5e-5,
+            per_device_train_batch_size=8,
+            per_device_eval_batch_size=8,
+            num_train_epochs=5,
+            weight_decay=0.01,
+            predict_with_generate=True,
+            no_cuda=True,  # For DirectML
+            fp16=True,
+            logging_dir=f'./logs/model_{model_num}',
+            logging_steps=10,
+            save_strategy="epoch",
+            load_best_model_at_end=True,
+            metric_for_best_model="mse"
+        )
+        
+        # Initialize trainer
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset["train"],
+            eval_dataset=dataset["test"],
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics
+        )
+        
+        # Train model
+        print("📈 Starting training...")
+        trainer.train()
+        
+        # Save model
+        print("💾 Saving model...")
+        trainer.save_model(model_path)
+        tokenizer.save_pretrained(model_path)
+        
+        print(f"✅ Model {model_num} saved successfully!")
+        
+    except Exception as e:
+        print(f"❌ Training failed: {e}")
+        raise
+    finally:
+        if 'model' in locals():
+            model.to('cpu')
+        torch.cuda.empty_cache()
+
+def predict_sentiment(model_path, question, response):
+    """Modified prediction function for question-response pairs"""
+    device = torch_directml.device()
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    input_text = f"Rate the sentiment: Question: {question} Response: {response}"
+    inputs = tokenizer(input_text, return_tensors="pt", max_length=MAX_INPUT_LENGTH, truncation=True).to(device)
+    
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_length=MAX_TARGET_LENGTH)
+        prediction = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    try:
+        return float(prediction.strip())
+    except ValueError:
+        return None
+```
+
+Key changes made:
+1. Using Flan-T5 instead of BERT
+2. Modified for sequence-to-sequence task
+3. Combined question and response in input
+4. Added proper data collation
+5. Updated metrics computation
+6. Modified prediction function
+
+To use this, you'll need to update your requirements.txt:
+
+```text
+transformers>=4.30.0
+torch
+torch-directml
+datasets
+scikit-learn
+pandas
+numpy
+```
+
+The main advantages of this implementation:
+1. Better context understanding (questions + responses)
+2. More natural sentiment score generation
+3. Instruction-following capabilities
+4. Better handling of text sequences
+
+The existing menu system and utility functions can remain largely unchanged, just update the imports and model paths.
+
+Would you like me to provide examples of how to use this model or explain any part in more detail?

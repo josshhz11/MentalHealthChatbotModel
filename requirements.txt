@@ -12,3 +12,5 @@ torchaudio
 torch-directml
 scikit-learn
 numpy
+psutil
+transformers

@@ -6,6 +6,3 @@ venv\Scripts\activate
 
 Deactivate virtual environment:
 deactivate/exit
-
-Run FastAPI app:
-uvicorn app:app --host 127.0.0.1 --port 5000
