@@ -1,0 +1,14 @@
+langchain
+langchain-ollama
+pandas
+streamlit
+transformers
+datasets
+evaluate
+accelerate
+torch
+torchvision
+torchaudio
+torch-directml
+scikit-learn
+numpy
