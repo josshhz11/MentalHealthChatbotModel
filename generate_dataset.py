@@ -262,39 +262,44 @@ def update_csv_files(conn):
     responses_df.to_csv('responses.csv', index=False)
     print("✅ CSV files updated successfully!")
 
-def initialize_db():
+def initialize_db(drop_existing=False):
+    """Initialize the SQLite database"""
     try:
-        # Initialize SQLite database
-        print("🗄️ Setting up SQLite database...")
         conn = sqlite3.connect('mental_health_data.db')
         cursor = conn.cursor()
-
-        # Drop existing tables if needed
-        cursor.execute('DROP TABLE IF EXISTS responses')
-        cursor.execute('DROP TABLE IF EXISTS questions')
-
-        # Create tables
+        
+        # Drop tables if requested
+        if drop_existing:
+            print("⚠️ Dropping existing tables...")
+            cursor.execute("DROP TABLE IF EXISTS responses")
+            cursor.execute("DROP TABLE IF EXISTS questions")
+        
+        # Create questions table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS questions (
             question_id INTEGER PRIMARY KEY,
             question_text TEXT NOT NULL
-        )''')
+        )
+        ''')
         
+        # Create responses table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS responses (
             response_id INTEGER PRIMARY KEY,
             question_id INTEGER,
             response_text TEXT NOT NULL,
-            sentiment_score INTEGER DEFAULT NULL,
-            FOREIGN KEY (question_id) REFERENCES questions (question_id)
-            )''')
-
+            sentiment_score INTEGER,
+            FOREIGN KEY (question_id) REFERENCES questions(question_id)
+        )
+        ''')
+        
         conn.commit()
         conn.close()
-        print("✅ Database setup complete!")
+        
+        print("✅ Database initialized successfully")
         return True
     except sqlite3.Error as e:
-        print("❌ Error initializing database:", e)
+        print(f"❌ Error initializing database: {e}")
         return False
     
 def label_sentiments():
@@ -629,7 +634,114 @@ def update_db_from_csv():
     except Exception as e:
         print(f"❌ Error: {e}")
     finally:
-        conn.close()    
+        conn.close()
+
+def rebuild_db_from_csv():
+    """Rebuild the entire database from CSV files"""
+    try:
+        print("🔄 Rebuilding database from CSV files...")
+        
+        # Check if CSV files exist
+        if not os.path.exists('questions.csv') or not os.path.exists('responses.csv'):
+            print("❌ Required CSV files not found. Need both 'questions.csv' and 'responses.csv'")
+            return
+            
+        # Create/initialize fresh database
+        if os.path.exists('mental_health_data.db'):
+            backup_file = f"mental_health_data_backup_{int(time.time())}.db"
+            print(f"⚠️ Existing database found. Creating backup: {backup_file}")
+            try:
+                import shutil
+                shutil.copy2('mental_health_data.db', backup_file)
+                print("✅ Backup created successfully")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to create backup: {e}")
+                choice = input("Continue without backup? (y/n): ")
+                if choice.lower() != 'y':
+                    return
+        
+        # Initialize new database
+        initialize_db(drop_existing=True)
+        
+        conn = sqlite3.connect('mental_health_data.db')
+        cursor = conn.cursor()
+        
+        # Read questions CSV
+        print("📊 Importing questions...")
+        questions_df = pd.read_csv('questions.csv')
+        if 'question_id' not in questions_df.columns or 'question_text' not in questions_df.columns:
+            print("❌ Questions CSV must contain 'question_id' and 'question_text' columns")
+            return
+            
+        # Import questions with original IDs
+        for _, row in questions_df.iterrows():
+            cursor.execute(
+                "INSERT INTO questions (question_id, question_text) VALUES (?, ?)",
+                (row['question_id'], row['question_text'])
+            )
+        
+        # Read responses CSV
+        print("📊 Importing responses...")
+        responses_df = pd.read_csv('responses.csv')
+        if 'response_id' not in responses_df.columns or 'response_text' not in responses_df.columns:
+            print("❌ Responses CSV must contain 'response_id' and 'response_text' columns")
+            return
+            
+        # Link responses to questions
+        questions_map = {}
+        for _, row in questions_df.iterrows():
+            questions_map[row['question_text']] = row['question_id']
+            
+        # Import responses
+        imported_count = 0
+        skipped_count = 0
+        
+        for _, row in responses_df.iterrows():
+            try:
+                # Find question ID from question text
+                question_id = questions_map.get(row['question_text'])
+                
+                if not question_id:
+                    print(f"⚠️ Could not find question ID for: {row['question_text'][:30]}...")
+                    skipped_count += 1
+                    continue
+                    
+                # Insert response with sentiment score if available
+                if 'sentiment_score' in responses_df.columns and pd.notna(row['sentiment_score']):
+                    cursor.execute(
+                        "INSERT INTO responses (response_id, question_id, response_text, sentiment_score) VALUES (?, ?, ?, ?)",
+                        (row['response_id'], question_id, row['response_text'], row['sentiment_score'])
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO responses (response_id, question_id, response_text) VALUES (?, ?, ?)",
+                        (row['response_id'], question_id, row['response_text'])
+                    )
+                    
+                imported_count += 1
+                
+                # Show progress
+                if imported_count % 50 == 0:
+                    print(f"Progress: {imported_count} responses imported...")
+                    
+            except Exception as e:
+                print(f"❌ Error importing response {row.get('response_id', 'unknown')}: {e}")
+                skipped_count += 1
+        
+        # Commit changes
+        conn.commit()
+        
+        print("\n✅ Database rebuild complete!")
+        print(f"📊 Statistics:")
+        print(f"- Questions imported: {len(questions_df)}")
+        print(f"- Responses imported: {imported_count}")
+        print(f"- Responses skipped: {skipped_count}")
+        
+    except Exception as e:
+        print(f"❌ Error rebuilding database: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def display_menu():
     print("\n=== Mental Health Question & Response Generator ===")
@@ -638,6 +750,7 @@ def display_menu():
     print("3. Query Database")
     print("4. Label Sentiments")
     print("5. Update DB from CSV")
+    print("6. Rebuild DB from CSV")
     print("0. Exit")
     return input("\nSelect an option: ")
 
@@ -663,6 +776,8 @@ def main():
                 label_sentiments()
             case '5':
                 update_db_from_csv()
+            case '6':
+                rebuild_db_from_csv()
             case '0':
                 print("Exiting...")
                 sys.exit()

@@ -3411,3 +3411,235 @@ The main advantages of this implementation:
 The existing menu system and utility functions can remain largely unchanged, just update the imports and model paths.
 
 Would you like me to provide examples of how to use this model or explain any part in more detail?
+
+josshhz11: can i ask if for this generate_dataset.py for the update_db_from_csv() function, i'm trying to put this code on my github, such that my groupmates can use the csv files of the data which are updated, to reconstruct the database itself and run the models from new_sentiment_model.py on their computer. can we create a new option in the display menu and main to construct the db from scratch from the csv files, either using initialize_db() or some elements of it as it is similar.
+
+i was wondering if this was possible because the schema for responses.csv is a little different in that it contains the question itself and not the question_id as per the db schema
+
+GitHub Copilot: Enable Claude 3.7 Sonnet (Preview) for all clients
+Enable access to the latest Claude 3.7 Sonnet model from Anthropic. [Learn more about how GitHub Copilot serves Claude 3.7 Sonnet](https://docs.github.com/copilot/using-github-copilot/using-claude-sonnet-in-github-copilot).
+
+josshhz11: @GitHubCopilot Enable: "Enable Claude 3.7 Sonnet (Preview) for all clients"
+
+GitHub Copilot: Let's create a function to rebuild the database from CSV files. This will allow your team members to reconstruct the database from the shared CSV files:
+
+```python
+def rebuild_db_from_csv():
+    """Rebuild the entire database from CSV files"""
+    try:
+        print("🔄 Rebuilding database from CSV files...")
+        
+        # Check if CSV files exist
+        if not os.path.exists('questions.csv') or not os.path.exists('responses.csv'):
+            print("❌ Required CSV files not found. Need both 'questions.csv' and 'responses.csv'")
+            return
+            
+        # Create/initialize fresh database
+        if os.path.exists('mental_health_data.db'):
+            backup_file = f"mental_health_data_backup_{int(time.time())}.db"
+            print(f"⚠️ Existing database found. Creating backup: {backup_file}")
+            try:
+                import shutil
+                shutil.copy2('mental_health_data.db', backup_file)
+                print("✅ Backup created successfully")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to create backup: {e}")
+                choice = input("Continue without backup? (y/n): ")
+                if choice.lower() != 'y':
+                    return
+        
+        # Initialize new database
+        initialize_db(drop_existing=True)
+        
+        conn = sqlite3.connect('mental_health_data.db')
+        cursor = conn.cursor()
+        
+        # Read questions CSV
+        print("📊 Importing questions...")
+        questions_df = pd.read_csv('questions.csv')
+        if 'question_id' not in questions_df.columns or 'question_text' not in questions_df.columns:
+            print("❌ Questions CSV must contain 'question_id' and 'question_text' columns")
+            return
+            
+        # Import questions with original IDs
+        for _, row in questions_df.iterrows():
+            cursor.execute(
+                "INSERT INTO questions (question_id, question_text) VALUES (?, ?)",
+                (row['question_id'], row['question_text'])
+            )
+        
+        # Read responses CSV
+        print("📊 Importing responses...")
+        responses_df = pd.read_csv('responses.csv')
+        if 'response_id' not in responses_df.columns or 'response_text' not in responses_df.columns:
+            print("❌ Responses CSV must contain 'response_id' and 'response_text' columns")
+            return
+            
+        # Link responses to questions
+        questions_map = {}
+        for _, row in questions_df.iterrows():
+            questions_map[row['question_text']] = row['question_id']
+            
+        # Import responses
+        imported_count = 0
+        skipped_count = 0
+        
+        for _, row in responses_df.iterrows():
+            try:
+                # Find question ID from question text
+                question_id = questions_map.get(row['question_text'])
+                
+                if not question_id:
+                    print(f"⚠️ Could not find question ID for: {row['question_text'][:30]}...")
+                    skipped_count += 1
+                    continue
+                    
+                # Insert response with sentiment score if available
+                if 'sentiment_score' in responses_df.columns and pd.notna(row['sentiment_score']):
+                    cursor.execute(
+                        "INSERT INTO responses (response_id, question_id, response_text, sentiment_score) VALUES (?, ?, ?, ?)",
+                        (row['response_id'], question_id, row['response_text'], row['sentiment_score'])
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO responses (response_id, question_id, response_text) VALUES (?, ?, ?)",
+                        (row['response_id'], question_id, row['response_text'])
+                    )
+                    
+                imported_count += 1
+                
+                # Show progress
+                if imported_count % 50 == 0:
+                    print(f"Progress: {imported_count} responses imported...")
+                    
+            except Exception as e:
+                print(f"❌ Error importing response {row.get('response_id', 'unknown')}: {e}")
+                skipped_count += 1
+        
+        # Commit changes
+        conn.commit()
+        
+        print("\n✅ Database rebuild complete!")
+        print(f"📊 Statistics:")
+        print(f"- Questions imported: {len(questions_df)}")
+        print(f"- Responses imported: {imported_count}")
+        print(f"- Responses skipped: {skipped_count}")
+        
+    except Exception as e:
+        print(f"❌ Error rebuilding database: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+```
+
+Now let's add this to the menu:
+
+```python
+def display_menu():
+    print("\n=== Mental Health Question & Response Generator ===")
+    print("1. Generate Refined Questions")
+    print("2. Generate Responses")
+    print("3. Query Database")
+    print("4. Label Sentiments")
+    print("5. Update DB from CSV")
+    print("6. Rebuild DB from CSV")  # New option
+    print("0. Exit")
+    return input("\nSelect an option: ")
+
+def main():
+    while True:
+        choice = display_menu()
+
+        match choice:
+            # ... existing cases ...
+            case '6':
+                rebuild_db_from_csv()
+            case '0':
+                print("Exiting...")
+                sys.exit()
+            case _:
+                print("Invalid choice. Please try again.")
+```
+
+Also, modify your [`initialize_db()`](../../../../../../../../../../../c:/Users/joshua/OneDrive/Documents/Working Folder/NTU/Extracurriculars/Case Comps/NUS-Guru SG Innovation Challenge/New/generate_dataset.py ) function to accept a parameter to drop existing tables:
+
+```python
+def initialize_db(drop_existing=False):
+    """Initialize the SQLite database"""
+    try:
+        conn = sqlite3.connect('mental_health_data.db')
+        cursor = conn.cursor()
+        
+        # Drop tables if requested
+        if drop_existing:
+            print("⚠️ Dropping existing tables...")
+            cursor.execute("DROP TABLE IF EXISTS responses")
+            cursor.execute("DROP TABLE IF EXISTS questions")
+        
+        # Create questions table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS questions (
+            question_id INTEGER PRIMARY KEY,
+            question_text TEXT NOT NULL
+        )
+        ''')
+        
+        # Create responses table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS responses (
+            response_id INTEGER PRIMARY KEY,
+            question_id INTEGER,
+            response_text TEXT NOT NULL,
+            sentiment_score INTEGER,
+            FOREIGN KEY (question_id) REFERENCES questions(question_id)
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        print("✅ Database initialized successfully")
+        return True
+    except sqlite3.Error as e:
+        print(f"❌ Error initializing database: {e}")
+        return False
+```
+
+This implementation:
+1. Creates a full database rebuild from CSV files
+2. Preserves original IDs
+3. Maps question text to question IDs
+4. Creates a backup of any existing database
+5. Handles potential format issues
+6. Shows detailed progress and statistics
+
+To use this:
+1. Share both CSV files with your team
+2. They clone the repository
+3. They run the program and select option 6
+4. The database is recreated with all data from the CSVs
+
+josshhz11: then, currently with my own database, my team and i have finished labelling the sentiment scores of all responses in responses.csv. will running update_db_from_csv() from the display menu option 5 successfully update the db?
+
+GitHub Copilot: Yes, running option 5 (`update_db_from_csv()`) will successfully update your database with all labeled sentiment scores from the responses.csv file.
+
+Looking at your implementation, the function:
+
+1. Reads the responses.csv file
+2. Checks that it contains the required columns (`response_id` and `sentiment_score`)
+3. Updates the database by running UPDATE queries for each row that has a sentiment score
+4. Shows progress during the update
+5. Provides statistics after completion
+6. Re-syncs the CSV files with the database
+
+Your team's workflow is perfect:
+1. Team members labeled the responses in the CSV
+2. You'll now run option 5 to update the database with those scores
+3. The database will contain all labeled sentiment scores
+
+Based on your responses.csv snippet, I can see you have:
+- 141 responses with a range of sentiment scores between 15-95
+- Good distribution across your sentiment range (1-100)
+- Responses to different questions (question_text is included)
+
+Simply select option 5 from the menu, and the function will handle the rest. The code will also give you statistics about how many records were updated and if there were any errors.
